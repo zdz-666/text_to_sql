@@ -1,11 +1,3 @@
-"""数据层：只读连接、schema 摘要、安全的 SQL 执行。
-
-安全设计（面试常问）：
-1. 用 SQLite 的只读 URI（mode=ro）打开连接——即便 SQL 里有写操作，数据库层面也会拒绝。
-2. execute_query 之前再做一道白名单校验：只允许 SELECT / WITH 开头。
-3. 限制返回行数（MAX_ROWS），避免一次性拉爆内存。
-"""
-
 import sqlite3
 from contextlib import contextmanager
 
