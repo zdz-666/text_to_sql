@@ -24,3 +24,8 @@ COLLECTION_NAME = os.getenv("COLLECTION_NAME", "metric_definitions")
 # 智能体行为
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 MAX_ROWS = int(os.getenv("MAX_ROWS", "50"))
+
+# 短期记忆：会话历史落盘目录 + 每次回注最近多少条
+CONVERSATIONS_DIR = str(BASE_DIR / os.getenv("CONVERSATIONS_DIR", "conversations"))
+HISTORY_MESSAGES = int(os.getenv("HISTORY_MESSAGES", "10"))
+HISTORY_MAX_CHARS = int(os.getenv("HISTORY_MAX_CHARS", "300"))

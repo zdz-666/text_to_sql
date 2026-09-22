@@ -1,34 +1,23 @@
-import json
-import re
-
 from langgraph.graph import END, START, StateGraph
 
 import config
+from data_sidekick import memory
 from data_sidekick.db import execute_query, get_schema_summary
-from data_sidekick.llm import get_llm
+from data_sidekick.llm import extract_json, get_llm
 from data_sidekick.rag import retrieve
 from data_sidekick.state import AgentState
 
 
-def _extract_json(text: str) -> dict:
-    """从 LLM 输出里稳健地抽出 JSON（容忍 markdown 代码块围栏）。"""
-    text = text.strip()
-    m = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
-    if m:
-        text = m.group(1)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        s, e = text.find("{"), text.rfind("}")
-        if s != -1 and e != -1 and e > s:
-            try:
-                return json.loads(text[s:e + 1])
-            except json.JSONDecodeError:
-                pass
-    return {}
-
-
 # ----------------------------- 节点 -----------------------------
+
+def route_node(state: AgentState) -> dict:
+    """先判定本轮到底要不要查库：闲聊/概念解释直接回答，省掉检索和执行。"""
+    llm = get_llm()
+    resp = llm.invoke(_build_route_prompt(state))
+    parsed = extract_json(resp.content)
+    # 解析失败时按"需要查库"处理：多跑一次查询，总好过漏答一个取数问题
+    return {"needs_sql": bool(parsed.get("needs_sql", True))}
+
 
 def retrieve_node(state: AgentState) -> dict:
     """检索口径 + 拉取 schema。"""
@@ -45,7 +34,7 @@ def generate_node(state: AgentState) -> dict:
     llm = get_llm()
     prompt = _build_generate_prompt(state)
     resp = llm.invoke(prompt)
-    parsed = _extract_json(resp.content)
+    parsed = extract_json(resp.content)
     return {
         "sql": parsed.get("sql", ""),
         "reasoning": parsed.get("reasoning", ""),
@@ -67,15 +56,19 @@ def execute_node(state: AgentState) -> dict:
 
 
 def answer_node(state: AgentState) -> dict:
-    """生成最终自然语言回答；若处于澄清态则直接返回澄清问题。"""
+    """生成最终自然语言回答；
+    澄清态直接返回澄清问题，未走查库的非取数问题走闲聊式回答。"""
     if state.get("clarify_needed"):
         return {"answer": state.get("clarification", "请补充信息。")}
-    llm = get_llm()
-    resp = llm.invoke(_build_answer_prompt(state))
-    return {"answer": resp.content}
+    builder = _build_answer_prompt if state.get("needs_sql", True) else _build_chat_prompt
+    return {"answer": get_llm().invoke(builder(state)).content}
 
 
 # ----------------------------- 路由 -----------------------------
+
+def route_after_route(state: AgentState) -> str:
+    return "retrieve" if state.get("needs_sql", True) else "answer"
+
 
 def route_after_generate(state: AgentState) -> str:
     if state.get("clarify_needed"):
@@ -96,6 +89,45 @@ _SYSTEM = (
     "schema 来编写只读查询，绝不臆造字段或口径。"
 )
 
+_CHAT_SYSTEM = "你是一名严谨、友善的数据分析助手，正在与业务用户对话。"
+
+
+def _format_history(history: list | None) -> str:
+    """把最近 k 条会话历史压成一段紧凑文本。
+
+    内容已在 memory.recent_messages() 里截断过，这里只负责排版。
+    """
+    if not history:
+        return ""
+    lines = []
+    for msg in history:
+        role = "用户" if msg.get("role") == "user" else "助手"
+        lines.append(f"{role}：{msg.get('content', '')}")
+    return "\n".join(lines)
+
+
+def _history_block(state: AgentState) -> str:
+    return _format_history(state.get("history")) or "（这是本轮对话的第一句话）"
+
+
+def _build_route_prompt(state: AgentState) -> str:
+    return f"""你是一个问数助手的意图路由。判断用户最新这句话是否需要查询数据库才能回答。
+
+【最近对话】
+{_history_block(state)}
+
+【用户最新提问】
+{state['question']}
+
+判定规则：
+1. 要取数才能回答的（算指标、看排名/趋势、查明细、对比数据）→ needs_sql 为 true。
+2. 不需要查库的（打招呼、问你能力范围、解释业务概念、感谢、与数据无关的闲聊）→ false。
+3. 追问里省略了主语但意图仍是取数（如"那 5 月呢"）→ true；这类必须结合最近对话判断。
+4. 拿不准时按 true 处理。
+
+只返回一个 JSON 对象（不要任何多余文字），格式：
+{{"needs_sql": true, "reason": "简要说明判断依据"}}"""
+
 
 def _build_generate_prompt(state: AgentState) -> str:
     error_hint = state.get("error") or ""
@@ -105,6 +137,9 @@ def _build_generate_prompt(state: AgentState) -> str:
         else ""
     )
     return f"""{_SYSTEM}
+
+【最近对话（本轮问题若有省略或指代，以此为准）】
+{_history_block(state)}
 
 【用户问题】
 {state['question']}
@@ -124,6 +159,21 @@ def _build_generate_prompt(state: AgentState) -> str:
 
 只返回一个 JSON 对象（不要任何多余文字），格式：
 {{"clarify_needed": false, "clarification": "", "sql": "SELECT ...", "reasoning": "简要说明"}}"""
+
+
+def _build_chat_prompt(state: AgentState) -> str:
+    """路由判定无需查库时使用：直接凭常识和历史对话回答。"""
+    return f"""{_CHAT_SYSTEM}
+
+本轮问题经判定无需查询数据库，请直接回答，不要输出 SQL，也不要编造任何查询结果或数字。
+
+【最近对话】
+{_history_block(state)}
+
+【用户问题】
+{state['question']}
+
+回答要求：自然连贯地接住上一轮话题，直接给结论，简短即可。"""
 
 
 def _build_answer_prompt(state: AgentState) -> str:
@@ -147,6 +197,9 @@ def _build_answer_prompt(state: AgentState) -> str:
 
 请把下面的查询结果用自然、清晰的中文汇报给业务用户。
 
+【最近对话】
+{_history_block(state)}
+
 【用户问题】
 {state['question']}
 
@@ -165,12 +218,18 @@ def _build_answer_prompt(state: AgentState) -> str:
 
 def build_graph():
     g = StateGraph(AgentState)
+    g.add_node("route", route_node)
     g.add_node("retrieve", retrieve_node)
     g.add_node("generate", generate_node)
     g.add_node("execute", execute_node)
     g.add_node("answer", answer_node)
 
-    g.add_edge(START, "retrieve")
+    g.add_edge(START, "route")
+    g.add_conditional_edges(
+        "route",
+        route_after_route,
+        {"retrieve": "retrieve", "answer": "answer"},
+    )
     g.add_edge("retrieve", "generate")
     g.add_conditional_edges(
         "generate",
@@ -187,8 +246,23 @@ def build_graph():
     return g.compile()
 
 
-def run_query(question: str) -> dict:
-    """对外入口：给它一个自然语言问题，返回完整状态 dict。"""
-    graph = build_graph()
-    initial: AgentState = {"question": question, "attempt": 0}
-    return graph.invoke(initial)
+def run_query(question: str, conversation_id: str | None = None) -> dict:
+    """对外入口：问一句话，返回完整状态 dict。
+
+    会话历史由本函数负责读写：进来先按 conversation_id 从文件里读最近 k 条回注给模型，
+    答完再把本轮的 user / assistant 两条消息追加落盘。不传 conversation_id 就新建一个。
+    """
+    if not conversation_id:
+        conversation_id = memory.create_conversation()["id"]
+
+    initial: AgentState = {
+        "question": question,
+        "history": memory.recent_messages(conversation_id),
+        "attempt": 0,
+    }
+    result = build_graph().invoke(initial)
+
+    memory.append_message(conversation_id, "user", question)
+    memory.append_message(conversation_id, "assistant", result.get("answer", ""))
+    result["conversation_id"] = conversation_id
+    return result

@@ -10,6 +10,11 @@
 
 - **口径先行**：用 Chroma 向量库存"指标字典"，写 SQL 前先检索口径（如 GMV 只统计 paid 订单），避免 LLM 瞎猜。
 
+- **会话历史（短期记忆）**：每个对话一个 JSON 文件（`memory.py`），答完把本轮问答写盘，
+  下次提问读最近 k 条回注给模型，支撑"那 5 月呢"这类省略式追问；前端支持多对话并行、随时切换。
+
+- **意图路由**：进图先由 `route` 判定本轮要不要查库，闲聊与概念解释直接回答，不浪费检索和执行。
+
 - **自纠错循环**：SQL 执行报错时，把错误信息回喂给模型重写，最多 `MAX_RETRIES` 轮。
 
 - **只读安全**：SQLite 以 `mode=ro` 只读连接打开 + 白名单校验（只允许 SELECT / WITH），双保险。
@@ -21,13 +26,15 @@
 ## 架构
 
 ```
-用户问题
+用户问题（+ 从会话文件读出的最近 k 条历史）
    │
-   ├─ retrieve  (Chroma 检索指标口径 + 读取 schema)
-   ├─ generate  (LLM 生成只读 SQL；口径缺失则进入澄清)
-   ├─ execute   (只读执行，失败记录 error)
+   ├─ route       (判定本轮是否需要查库；不需要就直接去 answer)
+   ├─ retrieve    (Chroma 检索指标口径 + 读取 schema)
+   ├─ generate    (LLM 生成只读 SQL；口径缺失则进入澄清)
+   ├─ execute     (只读执行，失败记录 error)
    │     └─ 出错且未超重试上限 → 回到 generate（自纠错）
-   └─ answer    (把结果 + SQL 汇报成自然语言)
+   └─ answer      (把结果 + SQL 汇报成自然语言；非取数问题直接闲聊式回答)
+                  （答完把本轮 user / assistant 两条消息追加进会话文件）
 ```
 
 技术栈：LangGraph（编排）、Chroma（口径检索）、FastAPI（后端）、Streamlit（前端）、SQLite（示例数据）。
@@ -42,10 +49,12 @@ data-sidekick/
 ├── app.py                 # Streamlit 前端
 ├── requirements.txt
 ├── .env.example
+├── conversations/         # 会话历史，一个对话一个 JSON 文件（运行时生成）
 └── data_sidekick/
     ├── llm.py             # LLM 封装（OpenAI 兼容接口）
     ├── db.py              # 只读连接 / schema 摘要 / 安全执行
     ├── rag.py             # Chroma 口径检索
+    ├── memory.py          # 会话历史：新建 / 追加 / 读取 / 删除
     ├── state.py           # LangGraph 状态定义
     └── agent.py           # 图编排与各节点
 ```
