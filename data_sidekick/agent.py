@@ -1,9 +1,11 @@
 from langgraph.graph import END, START, StateGraph
 
 import config
-from data_sidekick.db import execute_query, get_schema_summary
+from data_sidekick import semantics
+from data_sidekick.db import execute_query
 from data_sidekick.llm import extract_json, get_llm
-from data_sidekick.rag import retrieve
+from data_sidekick.rag import retrieve_metrics
+from data_sidekick.schema import select as select_schema
 from data_sidekick.state import AgentState
 
 
@@ -19,17 +21,24 @@ def route_node(state: AgentState) -> dict:
 
 
 def retrieve_node(state: AgentState) -> dict:
-    """检索口径 + 拉取 schema。"""
-    question = state["question"]
-    definitions = retrieve(question)
+    """检索命中的结构化指标 + 按需检索 schema。
+
+    schema 走 schema.select()：小库全量注入，大库只注入相关子集 +
+    沿已声明 join 的闭包。指标模板涉及的表会被锚定，保证模板始终可用。
+    """
+    matched = retrieve_metrics(state["question"], k=config.SEMANTICS_TOP_K)
+    definitions = "\n\n".join(semantics.metric_for_prompt(m) for m in matched)
+    picked = select_schema(state["question"], matched)
     return {
-        "retrieved_definitions": definitions or "（未命中相关口径定义）",
-        "schema_summary": get_schema_summary(),
+        "matched_metrics": matched,
+        "retrieved_definitions": definitions or "（未命中任何预写指标模板）",
+        "schema_summary": picked["text"],
+        "schema_mode": picked["mode"],
     }
 
 
 def generate_node(state: AgentState) -> dict:
-    """根据问题 + 口径 + schema（+ 上轮错误）生成只读 SQL。"""
+    """根据问题 + 指标模板 + 已声明 join + schema（+ 上轮错误）生成只读 SQL。"""
     llm = get_llm()
     prompt = _build_generate_prompt(state)
     resp = llm.invoke(prompt)
@@ -41,6 +50,21 @@ def generate_node(state: AgentState) -> dict:
         "clarification": parsed.get("clarification", ""),
         # 每次生成 SQL 都算一次尝试，operator.add 累加
         "attempt": 1,
+    }
+
+
+def validate_node(state: AgentState) -> dict:
+    """用声明的 join 关系静态校验候选 SQL，拦截扇出陷阱。
+
+    这是本项目最关键的守卫：扇出导致的重复计数不会报错、不会越界，
+    结果看起来完全正常，只有数字是错的。必须在这一步拦住。
+    """
+    issues = semantics.validate_sql(state.get("sql", ""))
+    if not issues:
+        return {"violations": [], "error": ""}
+    return {
+        "violations": issues,
+        "error": "\n".join(i["message"] for i in issues),
     }
 
 
@@ -71,6 +95,15 @@ def route_after_route(state: AgentState) -> str:
 
 def route_after_generate(state: AgentState) -> str:
     if state.get("clarify_needed"):
+        return "answer"
+    return "validate"
+
+
+def route_after_validate(state: AgentState) -> str:
+    """有扇出陷阱就回炉重写；重试耗尽则不再执行，直接带着警告去回答。"""
+    if state.get("violations"):
+        if state.get("attempt", 0) < config.MAX_RETRIES:
+            return "generate"
         return "answer"
     return "execute"
 
@@ -109,6 +142,13 @@ def _history_block(state: AgentState) -> str:
     return _format_history(state.get("history")) or "（这是本轮对话的第一句话）"
 
 
+def _metrics_titles(state: AgentState) -> str:
+    matched = state.get("matched_metrics") or []
+    if not matched:
+        return "（未命中预写模板，SQL 由模型依 schema 自行编写）"
+    return "、".join(m.get("title", m.get("name", "")) for m in matched)
+
+
 def _build_route_prompt(state: AgentState) -> str:
     return f"""你是一个问数助手的意图路由。判断用户最新这句话是否需要查询数据库才能回答。
 
@@ -131,7 +171,7 @@ def _build_route_prompt(state: AgentState) -> str:
 def _build_generate_prompt(state: AgentState) -> str:
     error_hint = state.get("error") or ""
     error_block = (
-        f"\n【上一轮 SQL 执行报错，请定位并修正，不要重复同样的错误】\n{error_hint}"
+        f"\n【上一轮生成被驳回，请针对下面的问题修正，不要重复同样的错误】\n{error_hint}"
         if error_hint
         else ""
     )
@@ -143,18 +183,32 @@ def _build_generate_prompt(state: AgentState) -> str:
 【用户问题】
 {state['question']}
 
-【业务口径定义（若与问题相关必须遵守）】
+【命中的指标模板（结构化口径）】
 {state['retrieved_definitions']}
+
+【已声明的表关系（只允许使用这些连接，禁止臆造连接键）】
+{semantics.joins_for_prompt()}
+
+【全局约定】
+{semantics.conventions_for_prompt()}
 
 【数据库 schema】
 {state['schema_summary']}
 {error_block}
 要求：
 1. 只输出只读查询（SELECT 或 WITH ... SELECT），禁止 INSERT/UPDATE/DELETE/DROP 等写操作。
-2. 口径定义与问题相关时，务必按其过滤（例如 GMV 只统计 status='paid' 的订单）。
-3. 仅当缺少必要信息导致无法唯一确定答案时，才把 clarify_needed 设为 true 并给出澄清问题；
+2. 若上方命中了指标模板，必须选最贴切的一个作为骨架直接采用：其聚合表达式与过滤条件不得改动，
+   只允许替换占位符（如 {{date_filter}}），以及在需要按维度拆分时追加已声明的连接和 GROUP BY / ORDER BY。
+   不要自己重新推导 GMV 之类的聚合口径。
+3. 若未命中模板，才自行编写；但仍须严格遵守已声明的表关系。
+4. 只能使用下方 schema 里列出的表和列。需要的表或列没有出现时，就说明无法确定，
+   不要凭列名相似去猜——大库里猜错列比查不出更危险。
+5. 严禁跨越"一对多"关系去聚合"一"侧的度量列：连接会把"一"侧每一行复制多份，SUM / AVG 会重复计数。
+   需要跨粒度分析时，先在子查询或 CTE 里把"多"侧聚合到"一"侧粒度，再连接。
+6. 统计订单数、客户数时，一旦连接了明细表，必须用 COUNT(DISTINCT ...) 而不是 COUNT(*)。
+7. 仅当缺少必要信息导致无法唯一确定答案时，才把 clarify_needed 设为 true 并给出澄清问题；
    否则一律设为 false 并直接给出 SQL。
-4. 结果行数较多时可加 LIMIT。
+8. 结果行数较多时可加 LIMIT。
 
 只返回一个 JSON 对象（不要任何多余文字），格式：
 {{"clarify_needed": false, "clarification": "", "sql": "SELECT ...", "reasoning": "简要说明"}}"""
@@ -179,7 +233,14 @@ def _build_answer_prompt(state: AgentState) -> str:
     rows = state.get("rows", [])
     columns = state.get("columns", [])
     error = state.get("error") or ""
-    if error:
+    violations = state.get("violations") or []
+    if violations:
+        body = (
+            "本轮生成的 SQL 被语义校验拦下，没有执行——因为它会踩扇出陷阱，算出的数字是错的"
+            "（比真实值偏大）。请如实告诉用户这个查询无法安全完成，并说明原因：\n"
+            + "\n".join(v["message"] for v in violations)
+        )
+    elif error:
         body = (
             f"查询执行最终失败（已重试 {state.get('attempt', 0)} 次）：{error}\n"
             "请向用户说明无法出数的原因，并给出可能的人为修正建议。"
@@ -202,6 +263,9 @@ def _build_answer_prompt(state: AgentState) -> str:
 【用户问题】
 {state['question']}
 
+【采用的指标模板】
+{_metrics_titles(state)}
+
 【依据的口径】
 {state['retrieved_definitions']}
 
@@ -220,6 +284,7 @@ def build_graph():
     g.add_node("route", route_node)
     g.add_node("retrieve", retrieve_node)
     g.add_node("generate", generate_node)
+    g.add_node("validate", validate_node)
     g.add_node("execute", execute_node)
     g.add_node("answer", answer_node)
 
@@ -233,7 +298,12 @@ def build_graph():
     g.add_conditional_edges(
         "generate",
         route_after_generate,
-        {"answer": "answer", "execute": "execute"},
+        {"answer": "answer", "validate": "validate"},
+    )
+    g.add_conditional_edges(
+        "validate",
+        route_after_validate,
+        {"generate": "generate", "execute": "execute", "answer": "answer"},
     )
     g.add_conditional_edges(
         "execute",

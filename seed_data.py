@@ -1,42 +1,16 @@
-"""一次性种子脚本：建 demo 数据库 + 写入示例数据 + 向量化指标字典。
+"""一次性种子脚本：建 demo 数据库 + 写入示例数据 + 向量化结构化指标字典。
 
 运行方式（在项目根目录）：
     python seed_data.py
 
 会自动生成 config.DB_PATH 指向的 demo.db，以及 config.CHROMA_DIR 下的向量库。
+指标与 join 声明都来自 semantics.json，本文件只负责灌数据。
 """
 
 import sqlite3
 
 import config
-from data_sidekick import rag
-
-# 每条定义：(文本, 唯一 id)。文本里明确写出"口径"，供 RAG 检索 + LLM 遵守。
-DEFINITIONS = [
-    (
-        "GMV（销售额）口径：统计 order_date 在所选时间范围内、status='paid' 的订单，"
-        "其 order_items 中 quantity * unit_price 之和。status='refunded' 或 'pending' 的订单不计入 GMV。",
-        "gmv",
-    ),
-    (
-        "客单价（ARPU）口径：GMV 除以已支付订单数（status='paid' 的订单条数）。",
-        "arpu",
-    ),
-    (
-        "复购率口径：在 status='paid' 的订单中，下单次数 >= 2 的客户数 除以 "
-        "至少有一次已支付订单的客户数。",
-        "repurchase_rate",
-    ),
-    (
-        "退款率口径：status='refunded' 的订单数 除以 总订单数（所有 status）。",
-        "refund_rate",
-    ),
-    (
-        "时间字段口径：orders.order_date 使用 'YYYY-MM-DD' 文本格式存储，"
-        "按时间过滤时用字符串比较即可，例如 order_date >= '2024-06-01'。",
-        "date_field",
-    ),
-]
+from data_sidekick import db, rag, semantics
 
 
 def create_database():
@@ -66,7 +40,8 @@ def create_database():
             order_id INTEGER PRIMARY KEY,
             customer_id INTEGER,
             order_date TEXT,
-            status TEXT
+            status TEXT,
+            discount REAL
         );
 
         CREATE TABLE order_items (
@@ -94,16 +69,19 @@ def create_database():
         (4, "T-shirt", "Apparel", 129),
         (5, "Coffee Maker", "Home", 499),
     ]
+    # discount 是"订单级"度量（Fivetran 复制 Salesforce Order 时常见这类订单级金额字段）。
+    # 它故意放在"一"侧：一旦有人 join 到 order_items 再 SUM(o.discount)，订单 1 有 2 条明细，
+    # 优惠 100 就被算成 200。这正是扇出陷阱的活体样本。
     orders = [
-        (1, 1, "2024-03-05", "paid"),
-        (2, 1, "2024-05-10", "paid"),
-        (3, 2, "2024-04-12", "paid"),
-        (4, 3, "2024-06-01", "refunded"),
-        (5, 4, "2024-06-15", "paid"),
-        (6, 5, "2024-07-01", "paid"),
-        (7, 1, "2024-07-20", "paid"),
-        (8, 6, "2024-08-01", "pending"),
-        (9, 2, "2024-08-10", "refunded"),
+        (1, 1, "2024-03-05", "paid", 100.0),
+        (2, 1, "2024-05-10", "paid", 0.0),
+        (3, 2, "2024-04-12", "paid", 50.0),
+        (4, 3, "2024-06-01", "refunded", 0.0),
+        (5, 4, "2024-06-15", "paid", 20.0),
+        (6, 5, "2024-07-01", "paid", 0.0),
+        (7, 1, "2024-07-20", "paid", 80.0),
+        (8, 6, "2024-08-01", "pending", 0.0),
+        (9, 2, "2024-08-10", "refunded", 0.0),
     ]
     order_items = [
         (1, 1, 1, 1, 5999),
@@ -125,7 +103,7 @@ def create_database():
         "INSERT INTO products VALUES (?, ?, ?, ?)", products
     )
     conn.executemany(
-        "INSERT INTO orders VALUES (?, ?, ?, ?)", orders
+        "INSERT INTO orders VALUES (?, ?, ?, ?, ?)", orders
     )
     conn.executemany(
         "INSERT INTO order_items VALUES (?, ?, ?, ?, ?)", order_items
@@ -135,15 +113,36 @@ def create_database():
     print(f"数据库已创建：{config.DB_PATH}")
 
 
-def seed_definitions():
-    rag.upsert_definitions(
-        texts=[d[0] for d in DEFINITIONS],
-        ids=[d[1] for d in DEFINITIONS],
+def seed_semantics():
+    """把语义层的指标与表结构灌进向量库。
+
+    先 reset 再灌，避免旧条目（如只有纯文本、没有结构化 payload 的历史格式）残留在检索结果里。
+    表索引用于大库场景：schema 大到不能全量塞 prompt 时，按问题召回相关表。
+    """
+    rag.reset()
+    metrics = semantics.metrics()
+    rag.upsert_metrics(metrics)
+    tables = db.get_schema()
+    rag.upsert_schema(tables)
+    print(
+        f"语义层已写入向量库：{config.CHROMA_DIR}"
+        f"（{len(metrics)} 个指标，{len(semantics.joins())} 条 join 声明）"
     )
-    print(f"指标字典已写入向量库：{config.CHROMA_DIR}")
+    print(f"表索引已写入：{len(tables)} 张表")
+
+
+def check_templates():
+    """自检预写 SQL：逐条按缺省占位符试跑一遍，模板有笔误在这里就暴露。"""
+    failures = semantics.verify_templates()
+    if failures:
+        for f in failures:
+            print(f"  模板自检失败 -> {f}")
+        raise SystemExit("有指标模板无法执行，请先修正 semantics.json")
+    print(f"模板自检通过：{len(semantics.metrics())} 个模板均可正常执行")
 
 
 if __name__ == "__main__":
     create_database()
-    seed_definitions()
+    check_templates()
+    seed_semantics()
     print("初始化完成。")

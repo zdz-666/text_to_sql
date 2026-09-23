@@ -35,6 +35,10 @@ class QueryResponse(BaseModel):
     columns: list[str] | None = None
     needs_sql: bool | None = None
     reasoning: str | None = None
+    # 命中的预写指标模板标题，便于前端展示"这次用的是哪个口径"
+    matched_metrics: list[str] | None = None
+    # schema 注入模式："full"（小库全量）或 "retrieved"（大库检索子集）
+    schema_mode: str | None = None
     conversation_id: str
 
 
@@ -72,6 +76,10 @@ def query(req: QueryRequest) -> QueryResponse:
         columns=result.get("columns"),
         needs_sql=result.get("needs_sql"),
         reasoning=result.get("reasoning"),
+        matched_metrics=[
+            m.get("title", m.get("name", "")) for m in result.get("matched_metrics") or []
+        ],
+        schema_mode=result.get("schema_mode"),
         conversation_id=conversation_id,
     )
 

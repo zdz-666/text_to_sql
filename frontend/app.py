@@ -256,6 +256,11 @@ if question:
         else:
             st.markdown(data.get("answer", ""))
 
+            if data.get("matched_metrics"):
+                st.caption("命中指标模板：" + "、".join(data["matched_metrics"]))
+            if data.get("schema_mode") == "retrieved":
+                st.caption("schema 注入：检索式子集（库较大，仅注入相关表）")
+
             if data.get("sql"):
                 with st.expander("查看执行的 SQL"):
                     st.code(data["sql"], language="sql")

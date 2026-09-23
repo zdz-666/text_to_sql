@@ -1,0 +1,95 @@
+{
+  "_comment": [
+    "语义层：显式声明表关系和结构化指标。这里是唯一的业务真相来源，seed_data.py 会把它索引进向量库。",
+    "为什么要显式声明 join：真实仓库（尤其 Fivetran 复制的 Salesforce / ServiceNow）通常没有任何外键，",
+    "连接关系只存在于某人脑子里。模型只能靠列名相似度猜，于是经常踩到扇出陷阱（fan trap）——",
+    "一个订单对应多条明细，join 之后对订单级度量求和会把每行重复计数，SQL 合法、schema 合法、数字是错的。",
+    "cardinality 的语义：many_to_one 表示 from 侧是多、to 侧是一，即 join 之后 to 侧的每一行会被复制多份。"
+  ],
+
+  "joins": [
+    {
+      "id": "order_items_orders",
+      "from_table": "order_items",
+      "from_column": "order_id",
+      "to_table": "orders",
+      "to_column": "order_id",
+      "cardinality": "many_to_one",
+      "note": "一个订单有多条明细，一条明细只属于一个订单"
+    },
+    {
+      "id": "orders_customers",
+      "from_table": "orders",
+      "from_column": "customer_id",
+      "to_table": "customers",
+      "to_column": "customer_id",
+      "cardinality": "many_to_one",
+      "note": "一个客户可以下多笔订单，一笔订单只属于一个客户"
+    },
+    {
+      "id": "order_items_products",
+      "from_table": "order_items",
+      "from_column": "product_id",
+      "to_table": "products",
+      "to_column": "product_id",
+      "cardinality": "many_to_one",
+      "note": "一条明细对应一个商品，一个商品可出现在多条明细里"
+    }
+  ],
+
+  "conventions": [
+    "时间字段 orders.order_date 以 'YYYY-MM-DD' 文本存储，按时间过滤直接用字符串比较，例如 o.order_date >= '2024-06-01' AND o.order_date <= '2024-06-30'。",
+    "只允许使用下方已声明的连接关系；不得因为列名相似就臆造连接键。",
+    "禁止跨越已声明的一对多关系去聚合“一”侧的度量列。join 会把“一”侧每一行复制多份，SUM / AVG 会重复计数。需要跨粒度分析时，先在子查询或 CTE 里把“多”侧聚合回“一”侧粒度，再做连接。",
+    "统计订单数、客户数这类实体个数时，一旦连接了明细表，COUNT(*) 会按明细行计数而被放大，必须改用 COUNT(DISTINCT o.order_id)。",
+    "金额类指标默认只统计 status='paid' 的订单；status='refunded' 与 'pending' 不计入。"
+  ],
+
+  "metrics": [
+    {
+      "name": "gmv",
+      "title": "GMV（成交总额）",
+      "aliases": ["GMV", "gmv", "销售额", "成交额", "成交总额", "营收", "收入", "卖了多少钱"],
+      "description": "所选时间范围内 status='paid' 的订单，其订单明细 quantity * unit_price 之和。退款与未支付订单不计入。",
+      "grain": "order_item",
+      "requires_joins": ["order_items_orders"],
+      "sql_template": "SELECT COALESCE(SUM(oi.quantity * oi.unit_price), 0) AS gmv\nFROM order_items oi\nJOIN orders o ON oi.order_id = o.order_id\nWHERE o.status = 'paid'\n  AND {date_filter}"
+    },
+    {
+      "name": "arpu",
+      "title": "客单价（ARPU）",
+      "aliases": ["客单价", "ARPU", "arpu", "平均订单金额", "每单金额"],
+      "description": "GMV 除以已支付订单数。分母必须按订单去重，否则连接明细表后会被放大。",
+      "grain": "order",
+      "requires_joins": ["order_items_orders"],
+      "sql_template": "SELECT ROUND(\n         COALESCE(SUM(oi.quantity * oi.unit_price), 0) * 1.0\n         / NULLIF(COUNT(DISTINCT o.order_id), 0), 2) AS arpu\nFROM order_items oi\nJOIN orders o ON oi.order_id = o.order_id\nWHERE o.status = 'paid'\n  AND {date_filter}"
+    },
+    {
+      "name": "repurchase_rate",
+      "title": "复购率",
+      "aliases": ["复购率", "回购率", "二次购买率"],
+      "description": "已支付订单中，下单次数 >= 2 的客户数 除以 至少有一笔已支付订单的客户数。",
+      "grain": "customer",
+      "requires_joins": [],
+      "sql_template": "WITH paid AS (\n  SELECT o.customer_id, COUNT(*) AS paid_orders\n  FROM orders o\n  WHERE o.status = 'paid'\n    AND {date_filter}\n  GROUP BY o.customer_id\n)\nSELECT ROUND(\n         COALESCE(SUM(CASE WHEN paid_orders >= 2 THEN 1 ELSE 0 END), 0) * 1.0\n         / NULLIF(COUNT(*), 0), 4) AS repurchase_rate\nFROM paid"
+    },
+    {
+      "name": "refund_rate",
+      "title": "退款率",
+      "aliases": ["退款率", "退货率", "退款比例"],
+      "description": "status='refunded' 的订单数 除以 总订单数（所有 status）。",
+      "grain": "order",
+      "requires_joins": [],
+      "sql_template": "SELECT ROUND(\n         COALESCE(SUM(CASE WHEN o.status = 'refunded' THEN 1 ELSE 0 END), 0) * 1.0\n         / NULLIF(COUNT(*), 0), 4) AS refund_rate\nFROM orders o\nWHERE {date_filter}"
+    },
+    {
+      "name": "total_discount",
+      "title": "总优惠金额",
+      "aliases": ["总优惠金额", "优惠金额", "折扣金额", "让利金额", "discount"],
+      "description": "已支付订单的订单级优惠金额之和。度量位于 orders（订单粒度），绝不能连接到订单明细后再求和。",
+      "grain": "order",
+      "requires_joins": [],
+      "sql_template": "SELECT COALESCE(SUM(o.discount), 0) AS total_discount\nFROM orders o\nWHERE o.status = 'paid'\n  AND {date_filter}"
+    }
+  ]
+}
