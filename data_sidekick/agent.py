@@ -1,7 +1,6 @@
 from langgraph.graph import END, START, StateGraph
 
 import config
-from data_sidekick import memory
 from data_sidekick.db import execute_query, get_schema_summary
 from data_sidekick.llm import extract_json, get_llm
 from data_sidekick.rag import retrieve
@@ -246,23 +245,15 @@ def build_graph():
     return g.compile()
 
 
-def run_query(question: str, conversation_id: str | None = None) -> dict:
-    """对外入口：问一句话，返回完整状态 dict。
+def run_query(question: str, history: list | None = None) -> dict:
+    """纯函数：给定问题 + 最近 k 条对话历史，跑图并返回完整状态 dict。
 
-    会话历史由本函数负责读写：进来先按 conversation_id 从文件里读最近 k 条回注给模型，
-    答完再把本轮的 user / assistant 两条消息追加落盘。不传 conversation_id 就新建一个。
+    文件的读写（创建会话、读历史、追加消息）全部交给调用方（backend/server.py）处理，
+    本函数不产生任何副作用，方便直接在 REST 端点和未来的异步 / 流式调用里复用。
     """
-    if not conversation_id:
-        conversation_id = memory.create_conversation()["id"]
-
     initial: AgentState = {
         "question": question,
-        "history": memory.recent_messages(conversation_id),
+        "history": history or [],
         "attempt": 0,
     }
-    result = build_graph().invoke(initial)
-
-    memory.append_message(conversation_id, "user", question)
-    memory.append_message(conversation_id, "assistant", result.get("answer", ""))
-    result["conversation_id"] = conversation_id
-    return result
+    return build_graph().invoke(initial)

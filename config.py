@@ -29,3 +29,6 @@ MAX_ROWS = int(os.getenv("MAX_ROWS", "50"))
 CONVERSATIONS_DIR = str(BASE_DIR / os.getenv("CONVERSATIONS_DIR", "conversations"))
 HISTORY_MESSAGES = int(os.getenv("HISTORY_MESSAGES", "10"))
 HISTORY_MAX_CHARS = int(os.getenv("HISTORY_MAX_CHARS", "300"))
+
+# 前后端分离时，前端用来找到后端的地址
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
