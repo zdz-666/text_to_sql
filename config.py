@@ -16,6 +16,11 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
 MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-chat")
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0"))
 
+# 路由模型：使用硅基流动 Kev-4b 快速决策模型代替通用 LLM 做意图路由。
+# Kev-4b 通过 SystemOne API 调用，比通用 chat 模型更快、更省 token。
+ROUTE_MODEL_NAME = os.getenv("ROUTE_MODEL_NAME", "SemIf")
+ROUTE_SCORE_THRESHOLD = float(os.getenv("ROUTE_SCORE_THRESHOLD", "0.5"))
+
 # 数据与检索
 DB_PATH = str(BASE_DIR / os.getenv("DB_PATH", "demo.db"))
 CHROMA_DIR = str(BASE_DIR / os.getenv("CHROMA_DIR", "chroma_store"))

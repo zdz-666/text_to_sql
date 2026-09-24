@@ -3,7 +3,7 @@ from langgraph.graph import END, START, StateGraph
 import config
 from data_sidekick import semantics
 from data_sidekick.db import execute_query
-from data_sidekick.llm import extract_json, get_llm
+from data_sidekick.llm import extract_json, get_llm, route_llm
 from data_sidekick.rag import retrieve_metrics
 from data_sidekick.schema import select as select_schema
 from data_sidekick.state import AgentState
@@ -12,12 +12,12 @@ from data_sidekick.state import AgentState
 # ----------------------------- 节点 -----------------------------
 
 def route_node(state: AgentState) -> dict:
-    """先判定本轮到底要不要查库：闲聊/概念解释直接回答，省掉检索和执行。"""
-    llm = get_llm()
-    resp = llm.invoke(_build_route_prompt(state))
-    parsed = extract_json(resp.content)
-    # 解析失败时按"需要查库"处理：多跑一次查询，总好过漏答一个取数问题
-    return {"needs_sql": bool(parsed.get("needs_sql", True))}
+    """先判定本轮到底要不要查库：闲聊/概念解释直接回答，省掉检索和执行。
+
+    路由使用硅基流动 Kev-4b 快速决策模型（SystemOne API），
+    比通用 chat 模型的意图判定更快、更省 token。
+    """
+    return {"needs_sql": route_llm(_build_route_state(state))["needs_sql"]}
 
 
 def retrieve_node(state: AgentState) -> dict:
@@ -149,23 +149,20 @@ def _metrics_titles(state: AgentState) -> str:
     return "、".join(m.get("title", m.get("name", "")) for m in matched)
 
 
-def _build_route_prompt(state: AgentState) -> str:
-    return f"""你是一个问数助手的意图路由。判断用户最新这句话是否需要查询数据库才能回答。
-
-【最近对话】
+def _build_route_state(state: AgentState) -> str:
+    """为 Kev-4b SystemOne API 拼装上下文。Kev-4b 的 state 字段接收自由文本，
+    把历史对话、当前问题、判定规则全部放进去，由模型自行理解并输出 noul 分数。"""
+    return f"""最近对话：
 {_history_block(state)}
 
-【用户最新提问】
+用户最新提问：
 {state['question']}
 
 判定规则：
-1. 要取数才能回答的（算指标、看排名/趋势、查明细、对比数据）→ needs_sql 为 true。
-2. 不需要查库的（打招呼、问你能力范围、解释业务概念、感谢、与数据无关的闲聊）→ false。
-3. 追问里省略了主语但意图仍是取数（如"那 5 月呢"）→ true；这类必须结合最近对话判断。
-4. 拿不准时按 true 处理。
-
-只返回一个 JSON 对象（不要任何多余文字），格式：
-{{"needs_sql": true, "reason": "简要说明判断依据"}}"""
+1. 要取数才能回答的（算指标、看排名/趋势、查明细、对比数据）→ 需要查库。
+2. 不需要查库的（打招呼、问能力范围、解释业务概念、感谢、与数据无关的闲聊）→ 不需要查库。
+3. 追问里省略了主语但意图仍是取数（如"那 5 月呢"）→ 需要查库，必须结合最近对话判断。
+4. 拿不准时按需要查库处理。"""
 
 
 def _build_generate_prompt(state: AgentState) -> str:
