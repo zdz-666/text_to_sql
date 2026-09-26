@@ -1,0 +1,54 @@
+# =============================================================================
+# DataSidekick — 主题层
+#
+# 设计方向：中性极简。冷调纸白承载界面，墨黑承载文字，装饰只保留发丝级分隔线。
+# 中性色统一带一丝冷色相（色相 255，彩度 0.01），避免死灰；
+# 强调色只有一个（"石油青"），只出现在 10% 的位置：焦点环、主按钮、
+# 命中口径标记、链接。强调色一旦铺开就不再是强调。
+#
+# 这里只放 Streamlit 主题层能表达的东西（颜色、字体、圆角、边框）；
+# 主题层表达不了的排版与状态细节在 frontend/app.py 的 CSS 里。
+# =============================================================================
+
+[theme]
+base = "light"
+
+# 唯一强调色 — oklch(48% 0.07 195) 的 sRGB 近似；白字对比度 6.3:1
+primaryColor = "#216A6A"
+# 主画布：极浅冷白
+backgroundColor = "#F9FAFB"
+# 内嵌面：代码块、结果表、用户消息
+secondaryBackgroundColor = "#F1F2F4"
+# 正文墨黑 — oklch(24% 0.01 255)，对纸白 15.6:1
+textColor = "#1C2024"
+# 发丝级边框
+borderColor = "#E3E4E7"
+
+linkColor = "#1C2024"
+linkUnderline = true
+
+codeBackgroundColor = "#F1F2F4"
+codeTextColor = "#1C2024"
+
+dataframeBorderColor = "#E3E4E7"
+dataframeHeaderBackgroundColor = "#F1F2F4"
+
+# --- 印刷：IBM Plex Sans（正文）+ IBM Plex Mono（SQL / 数字） ---------------
+# Plex 系列自带工程感，贴合"数据工作台"的定位；
+# Sans 与 Mono 是结构性的差异，不是两个相似的几何无衬线在互相较劲。
+font = "IBM Plex Sans:https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+codeFont = "IBM Plex Mono:https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap"
+baseFontSize = 16
+
+# --- 几何：克制的圆角，不做大圆角 -------------------------------------------
+baseRadius = "0.5rem"
+buttonRadius = "0.5rem"
+
+showWidgetBorder = true
+showSidebarBorder = true
+
+[theme.sidebar]
+# 侧栏与主区同族但各降一档明度：用"面"分层，而不是靠分割线
+backgroundColor = "#F4F5F7"
+secondaryBackgroundColor = "#ECEDEF"
+borderColor = "#E3E4E7"
