@@ -28,6 +28,20 @@ class QueryRequest(BaseModel):
     conversation_id: str | None = None  # 留空则新建
 
 
+class PlanStepResult(BaseModel):
+    id: int
+    description: str
+    status: str
+    sql: str | None = None
+    columns: list[str] | None = None
+    rows: list[list] | None = None
+    row_count: int = 0
+    truncated: bool = False
+    attempts: int = 0
+    output_hint: str | None = None
+    error: str | None = None
+
+
 class QueryResponse(BaseModel):
     answer: str
     sql: str | None = None
@@ -39,6 +53,11 @@ class QueryResponse(BaseModel):
     matched_metrics: list[str] | None = None
     # schema 注入模式："full"（小库全量）或 "retrieved"（大库检索子集）
     schema_mode: str | None = None
+    # 多步规划：是否拆解、拆解后的步骤描述、各步执行结果、中止信息
+    needs_plan: bool | None = None
+    plan: list[str] | None = None
+    steps: list[PlanStepResult] | None = None
+    step_failure: dict | None = None
     conversation_id: str
 
 
@@ -80,6 +99,25 @@ def query(req: QueryRequest) -> QueryResponse:
             m.get("title", m.get("name", "")) for m in result.get("matched_metrics") or []
         ],
         schema_mode=result.get("schema_mode"),
+        needs_plan=result.get("needs_plan"),
+        plan=[s.get("description", "") for s in result.get("plan") or []],
+        steps=[
+            PlanStepResult(
+                id=s.get("id", 0),
+                description=s.get("description", ""),
+                status=s.get("status", ""),
+                sql=s.get("sql"),
+                columns=s.get("columns"),
+                rows=s.get("rows"),
+                row_count=s.get("row_count", 0),
+                truncated=s.get("truncated", False),
+                attempts=s.get("attempts", 0),
+                output_hint=s.get("output_hint"),
+                error=s.get("error") or None,
+            )
+            for s in result.get("step_results") or []
+        ] or None,
+        step_failure=result.get("step_failure") or None,
         conversation_id=conversation_id,
     )
 

@@ -741,19 +741,53 @@ if question:
             if data.get("schema_mode") == "retrieved":
                 st.caption("schema 注入：检索式子集（库较大，仅注入相关表）")
 
-            if data.get("sql"):
-                with st.expander("查看执行的 SQL"):
-                    st.code(data["sql"], language="sql")
+            plan = data.get("plan") or []
+            steps = data.get("steps") or []
+            failure = data.get("step_failure")
 
-            rows = data.get("rows") or []
-            columns = data.get("columns") or []
-            if rows:
-                table = [
-                    {columns[i]: row[i] for i in range(len(columns))}
-                    for row in rows
-                ]
-                with st.expander("查看原始结果"):
-                    st.dataframe(table, use_container_width=True)
+            if plan:
+                st.caption("拆解为 %d 步：%s" % (len(plan), " → ".join(
+                    f"第 {i + 1} 步" for i in range(len(plan))
+                )))
+            if failure:
+                st.warning(
+                    "第 %s 步中止（%s）：%s"
+                    % (failure.get("step"), failure.get("kind"), failure.get("reason"))
+                )
+
+            if steps:
+                with st.expander("查看分步执行明细", expanded=bool(failure)):
+                    for step in steps:
+                        mark = "完成" if step.get("status") == "ok" else "失败"
+                        st.markdown(f"**{mark} 第 {step.get('id')} 步** {step.get('description', '')}")
+                        if step.get("output_hint"):
+                            st.caption("应产出：" + step["output_hint"])
+                        if step.get("error"):
+                            st.caption("失败原因：" + step["error"])
+                        if step.get("sql"):
+                            st.code(step["sql"], language="sql")
+                        step_rows = step.get("rows") or []
+                        step_columns = step.get("columns") or []
+                        if step_rows:
+                            table = [
+                                {step_columns[i]: row[i] for i in range(len(step_columns))}
+                                for row in step_rows
+                            ]
+                            st.dataframe(table, use_container_width=True)
+            else:
+                if data.get("sql"):
+                    with st.expander("查看执行的 SQL"):
+                        st.code(data["sql"], language="sql")
+
+                rows = data.get("rows") or []
+                columns = data.get("columns") or []
+                if rows:
+                    table = [
+                        {columns[i]: row[i] for i in range(len(columns))}
+                        for row in rows
+                    ]
+                    with st.expander("查看原始结果"):
+                        st.dataframe(table, use_container_width=True)
 
     if data:
         st.session_state.conversation_id = data.get("conversation_id")

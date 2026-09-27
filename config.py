@@ -52,6 +52,15 @@ SCHEMA_RECALL_DISTANCE_RATIO = float(os.getenv("SCHEMA_RECALL_DISTANCE_RATIO", "
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 MAX_ROWS = int(os.getenv("MAX_ROWS", "50"))
 
+# 多步规划（planner）
+# 拆解步数上限：超过即判定 planner 输出不可信，退回单条 SQL 路径（不截断执行残缺链路）。
+MAX_PLAN_STEPS = int(os.getenv("MAX_PLAN_STEPS", "4"))
+
+# 前序步骤摘要注入：每步保留几行、单步摘要字符上限、全部摘要总字符上限。
+STEP_SUMMARY_ROWS = int(os.getenv("STEP_SUMMARY_ROWS", "3"))
+STEP_SUMMARY_MAX_CHARS = int(os.getenv("STEP_SUMMARY_MAX_CHARS", "1200"))
+STEP_SUMMARY_TOTAL_MAX_CHARS = int(os.getenv("STEP_SUMMARY_TOTAL_MAX_CHARS", "4000"))
+
 # 短期记忆：会话历史落盘目录 + 每次回注最近多少条
 CONVERSATIONS_DIR = str(BASE_DIR / os.getenv("CONVERSATIONS_DIR", "conversations"))
 HISTORY_MESSAGES = int(os.getenv("HISTORY_MESSAGES", "10"))

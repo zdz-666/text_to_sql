@@ -33,3 +33,25 @@ class AgentState(TypedDict, total=False):
     clarification: str
     # 最终自然语言回答
     answer: str
+
+    # ---- 多步规划（planner）----
+    # 路由判定：本轮是否需要拆解。由 route_llm 的第二个问题给出
+    needs_plan: bool
+    # 子步骤列表，元素 {id, description, depends_on, metrics, tables, output_hint}
+    plan: list
+    # 拆解说明；planner 输出不可用时记原因，便于展示与排查
+    plan_reasoning: str
+    # 当前步骤下标（0-based），由 step_collect 推进
+    current_step: int
+    # "当前这一步"已生成 SQL 的次数。
+    # 刻意不使用 attempt：后者是 Annotated[int, operator.add] 全局累加器，
+    # 多步下会跨步累积，导致后面的步骤一启动就没有重试预算。
+    step_attempt: int
+    # 当前步骤专用的口径 / schema 文本与注入模式
+    step_definitions: str
+    step_schema: str
+    step_schema_mode: str
+    # 各步执行记录（append-only）
+    step_results: Annotated[list, operator.add]
+    # 中止信息 {step, kind, description, reason, sql, attempts}
+    step_failure: dict
