@@ -340,16 +340,21 @@ _SYSTEM = (
 _CHAT_SYSTEM = "你是一名严谨、友善的数据分析助手，正在与业务用户对话。"
 
 
-def _format_history(history: list | None) -> str:
-    """把最近 k 条会话历史压成一段紧凑文本。
+_HISTORY_ROLES = {"user": "用户", "assistant": "助手", "system": "早期对话摘要"}
 
-    内容已在 memory.recent_messages() 里截断过，这里只负责排版。
+
+def _format_history(history: list | None) -> str:
+    """把回注的历史压成一段紧凑文本。
+
+    history 由 memory.recent_messages() 组装：短对话是最近几条消息；长对话首条是
+    role="system" 的记忆摘要，要单独渲染，不能混标成"助手"。内容已在 memory 侧
+    截断过，这里只负责排版。
     """
     if not history:
         return ""
     lines = []
     for msg in history:
-        role = "用户" if msg.get("role") == "user" else "助手"
+        role = _HISTORY_ROLES.get(msg.get("role"), "助手")
         lines.append(f"{role}：{msg.get('content', '')}")
     return "\n".join(lines)
 

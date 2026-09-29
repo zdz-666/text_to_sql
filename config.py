@@ -61,10 +61,23 @@ STEP_SUMMARY_ROWS = int(os.getenv("STEP_SUMMARY_ROWS", "3"))
 STEP_SUMMARY_MAX_CHARS = int(os.getenv("STEP_SUMMARY_MAX_CHARS", "1200"))
 STEP_SUMMARY_TOTAL_MAX_CHARS = int(os.getenv("STEP_SUMMARY_TOTAL_MAX_CHARS", "4000"))
 
-# 短期记忆：会话历史落盘目录 + 每次回注最近多少条
+# 短期记忆：会话历史落盘目录 + 单条消息回注时的截断长度
 CONVERSATIONS_DIR = str(BASE_DIR / os.getenv("CONVERSATIONS_DIR", "conversations"))
-HISTORY_MESSAGES = int(os.getenv("HISTORY_MESSAGES", "10"))
 HISTORY_MAX_CHARS = int(os.getenv("HISTORY_MAX_CHARS", "300"))
+
+# 滑动窗口 + 记忆压缩
+# 消息条数达到 HISTORY_COMPRESS_TRIGGER 后，把滑出窗口的旧消息折进一份摘要，随历史一起回注；
+# 未达到时只做纯滑动窗口，不调大模型。
+HISTORY_COMPRESS_TRIGGER = int(os.getenv("HISTORY_COMPRESS_TRIGGER", "10"))
+# 回注窗口：已有摘要时取最近 HISTORY_RECENT_COMPRESSED 条（摘要承担了更早的上下文）；
+# 没有摘要时改取最近 HISTORY_RECENT_SHORT 条，避免只给 4 条导致上下文太薄。
+HISTORY_RECENT_COMPRESSED = int(os.getenv("HISTORY_RECENT_COMPRESSED", "4"))
+HISTORY_RECENT_SHORT = int(os.getenv("HISTORY_RECENT_SHORT", "5"))
+# 摘要按增量折叠更新：窗口外又攒够这么多条未压缩消息，才再调一次大模型，
+# 否则每个请求都要多一次压缩调用。首个摘要不受此限（攒够即压）。
+HISTORY_COMPRESS_BATCH = int(os.getenv("HISTORY_COMPRESS_BATCH", "10"))
+# 摘要正文的硬上限，兜住反复折叠带来的膨胀
+HISTORY_SUMMARY_MAX_CHARS = int(os.getenv("HISTORY_SUMMARY_MAX_CHARS", "800"))
 
 # 前后端分离时，前端用来找到后端的地址
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
