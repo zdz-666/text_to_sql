@@ -8,3 +8,4 @@ demo.db
 chroma_store/
 conversations/
 .DS_Store
+eval/
